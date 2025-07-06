@@ -1,5 +1,7 @@
 # SWR Cache
 
+[![CI](https://github.com/aiagentinc/swre/actions/workflows/test.yml/badge.svg)](https://github.com/aiagentinc/swre/actions/workflows/test.yml)
+[![codecov](https://codecov.io/gh/aiagentinc/swre/graph/badge.svg)](https://codecov.io/gh/aiagentinc/swre)
 [![Go Reference](https://pkg.go.dev/badge/github.com/aiagentinc/swre.svg)](https://pkg.go.dev/github.com/aiagentinc/swre)
 [![Go Report Card](https://goreportcard.com/badge/github.com/aiagentinc/swre)](https://goreportcard.com/report/github.com/aiagentinc/swre)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)

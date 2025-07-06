@@ -36,12 +36,13 @@ jobs:
     
     - name: Generate test coverage
       if: matrix.go-version == '1.24'
-      run: go test -coverprofile=coverage.out ./...
+      run: go test -coverprofile=coverage.out -covermode=atomic ./...
     
     - name: Upload coverage to Codecov
       if: matrix.go-version == '1.24'
       uses: codecov/codecov-action@v4
       with:
+        token: ${{ secrets.CODECOV_TOKEN }}
         file: ./coverage.out
         flags: unittests
         name: codecov-umbrella
