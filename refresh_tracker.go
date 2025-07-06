@@ -4,8 +4,15 @@
 package swre
 
 import (
+	"hash/fnv"
 	"sync"
 	"time"
+)
+
+const (
+	// Number of shards - must be power of 2 for efficient modulo
+	numShards = 16
+	shardMask = numShards - 1
 )
 
 // RefreshTracker prevents duplicate background refresh operations through
@@ -16,18 +23,29 @@ import (
 // - Automatic cleanup of expired tracking entries
 // - Memory-efficient with bounded growth
 // - Graceful shutdown support
+// - Sharded design for high concurrency performance
+//
+// Performance Optimizations:
+// - Uses 16 shards to reduce lock contention
+// - Incremental cleanup to avoid blocking all operations
+// - Read-write mutex per shard for optimal read performance
 //
 // Design Rationale:
 // - Uses time-based expiration instead of explicit cleanup
 // - Background cleanup goroutine prevents unbounded memory growth
-// - Read-write mutex optimizes for frequent read operations
-// - Separate cleanup context allows independent lifecycle management
+// - Sharding reduces lock contention by 16x
+// - Incremental cleanup processes one shard at a time
 type RefreshTracker struct {
-	mu         sync.RWMutex         // Protects concurrent access to entries map
-	entries    map[string]time.Time // Maps cache keys to expiration timestamps
-	ttl        time.Duration        // How long to track each refresh operation
-	cleanupCtx chan struct{}        // Signals cleanup goroutine to stop
-	wg         sync.WaitGroup       // Waits for cleanup goroutine during shutdown
+	shards     [numShards]*refreshShard
+	ttl        time.Duration
+	cleanupCtx chan struct{}
+	wg         sync.WaitGroup
+}
+
+// refreshShard represents a single shard with its own lock
+type refreshShard struct {
+	mu      sync.RWMutex
+	entries map[string]time.Time
 }
 
 // NewRefreshTracker creates a new refresh tracker with automatic cleanup.
@@ -38,12 +56,18 @@ type RefreshTracker struct {
 // - Too short: May allow duplicate refreshes for slow operations
 // - Too long: Increases memory usage and cleanup overhead
 // - Recommended: 2-5x your typical refresh timeout
-// - Default: 5 minutes for most DNS caching scenarios
+// - Default: 5 minutes for most caching scenarios
 func NewRefreshTracker(ttl time.Duration) *RefreshTracker {
 	rt := &RefreshTracker{
-		entries:    make(map[string]time.Time),
 		ttl:        ttl,
 		cleanupCtx: make(chan struct{}),
+	}
+
+	// Initialize all shards
+	for i := 0; i < numShards; i++ {
+		rt.shards[i] = &refreshShard{
+			entries: make(map[string]time.Time),
+		}
 	}
 
 	// Launch background cleanup goroutine
@@ -51,6 +75,14 @@ func NewRefreshTracker(ttl time.Duration) *RefreshTracker {
 	go rt.cleanup()
 
 	return rt
+}
+
+// getShard returns the shard for a given key using FNV-1a hash
+func (rt *RefreshTracker) getShard(key string) *refreshShard {
+	h := fnv.New32a()
+	// FNV-1a hash Write never returns an error, but we handle it to satisfy gosec
+	_, _ = h.Write([]byte(key))
+	return rt.shards[h.Sum32()&shardMask]
 }
 
 // TrySet atomically attempts to mark a key as being refreshed.
@@ -62,17 +94,18 @@ func NewRefreshTracker(ttl time.Duration) *RefreshTracker {
 // - false: Key already being refreshed by another goroutine (caller should skip)
 //
 // Race Condition Handling:
-// - Uses exclusive locking to prevent race conditions
+// - Uses per-shard locking to minimize contention
 // - Automatically handles expired entries without external cleanup
 // - Provides strong consistency guarantees for refresh coordination
 func (rt *RefreshTracker) TrySet(key string) bool {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
+	shard := rt.getShard(key)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
 	now := time.Now()
 
 	// Check if key is already being tracked
-	if expireTime, exists := rt.entries[key]; exists {
+	if expireTime, exists := shard.entries[key]; exists {
 		if now.Before(expireTime) {
 			return false // Still active, refresh already in progress
 		}
@@ -80,15 +113,16 @@ func (rt *RefreshTracker) TrySet(key string) bool {
 	}
 
 	// Mark key as being refreshed with expiration time
-	rt.entries[key] = now.Add(rt.ttl)
+	shard.entries[key] = now.Add(rt.ttl)
 	return true
 }
 
 // Delete removes a key from the refresh tracker.
 func (rt *RefreshTracker) Delete(key string) {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	delete(rt.entries, key)
+	shard := rt.getShard(key)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	delete(shard.entries, key)
 }
 
 // Get checks if a key is currently being refreshed without side effects.
@@ -106,41 +140,46 @@ func (rt *RefreshTracker) Delete(key string) {
 // - Monitoring and debugging refresh patterns
 // - Load balancing decisions based on refresh status
 func (rt *RefreshTracker) Get(key string) bool {
-	rt.mu.RLock()
-	defer rt.mu.RUnlock()
+	shard := rt.getShard(key)
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
 
 	// Check if key exists and is still valid
-	if expireTime, exists := rt.entries[key]; exists {
+	if expireTime, exists := shard.entries[key]; exists {
 		return time.Now().Before(expireTime)
 	}
 	return false
 }
 
-// cleanup runs background maintenance to prevent memory leaks.
+// cleanup runs background maintenance with incremental shard processing.
 // This goroutine periodically removes expired tracking entries,
 // ensuring bounded memory usage even under high refresh rates.
 //
 // Cleanup Strategy:
-// - Runs every 30 seconds (balances memory vs CPU overhead)
-// - Removes entries that have exceeded their TTL
+// - Runs every 2 seconds per shard (32 seconds for full cycle)
+// - Processes one shard at a time to minimize lock duration
 // - Uses efficient map iteration for batch cleanup
 // - Responds to shutdown signals for clean termination
 //
 // Memory Management:
 // - Prevents unbounded growth under high refresh rates
 // - Handles edge cases like long-running refresh operations
-// - Maintains efficiency even with thousands of tracked keys
+// - Maintains efficiency even with millions of tracked keys
 func (rt *RefreshTracker) cleanup() {
 	defer rt.wg.Done()
 
-	// Clean up every 30 seconds - balance between memory usage and CPU overhead
-	ticker := time.NewTicker(30 * time.Second)
+	// Clean up more frequently but process less each time
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
+
+	shardIndex := 0
 
 	for {
 		select {
 		case <-ticker.C:
-			rt.cleanupExpired()
+			// Clean up one shard at a time (round-robin)
+			rt.cleanupShard(shardIndex)
+			shardIndex = (shardIndex + 1) % numShards
 		case <-rt.cleanupCtx:
 			// Shutdown requested
 			return
@@ -148,27 +187,35 @@ func (rt *RefreshTracker) cleanup() {
 	}
 }
 
-// cleanupExpired performs batch removal of expired tracking entries.
-// This method efficiently prunes the entries map to prevent memory bloat
-// while maintaining thread safety through exclusive locking.
-//
-// Performance Considerations:
-// - Uses exclusive lock to prevent interference with active operations
-// - Batch processes all expired entries in single critical section
-// - Map deletions are O(1) operations
-// - Lock duration scales with number of expired entries, not total entries
-func (rt *RefreshTracker) cleanupExpired() {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
+// cleanupShard cleans expired entries from a single shard.
+// This is the key optimization - lock contention is reduced by 16x
+// compared to cleaning all entries at once.
+func (rt *RefreshTracker) cleanupShard(shardIndex int) {
+	shard := rt.shards[shardIndex]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-	// Snapshot current time for consistent expiration check
 	now := time.Now()
 
-	// Remove all entries that have exceeded their TTL
-	for key, expireTime := range rt.entries {
+	// Remove expired entries from this shard only
+	for key, expireTime := range shard.entries {
 		if now.After(expireTime) {
-			delete(rt.entries, key)
+			delete(shard.entries, key)
 		}
+	}
+}
+
+// cleanupExpired performs batch removal of all expired tracking entries.
+// This method efficiently prunes all shards to prevent memory bloat
+// while maintaining thread safety through per-shard locking.
+//
+// Performance Considerations:
+// - Processes shards sequentially to avoid overwhelming the system
+// - Each shard lock is held only for its cleanup duration
+// - Total cleanup time is sum of individual shard cleanup times
+func (rt *RefreshTracker) cleanupExpired() {
+	for i := 0; i < numShards; i++ {
+		rt.cleanupShard(i)
 	}
 }
 
@@ -191,7 +238,11 @@ func (rt *RefreshTracker) Stop() {
 // Note: The returned value is a snapshot and may change immediately
 // after the call returns due to concurrent operations.
 func (rt *RefreshTracker) Size() int {
-	rt.mu.RLock()
-	defer rt.mu.RUnlock()
-	return len(rt.entries)
+	total := 0
+	for i := 0; i < numShards; i++ {
+		rt.shards[i].mu.RLock()
+		total += len(rt.shards[i].entries)
+		rt.shards[i].mu.RUnlock()
+	}
+	return total
 }
