@@ -1,0 +1,46 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.24'
+        cache: true
+    
+    - name: Download dependencies
+      run: go mod download
+    
+    - name: Run benchmarks
+      run: |
+        go test -bench=. -benchmem -run=^$ ./... | tee benchmark_results.txt
+    
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-results
+        path: benchmark_results.txt
+        retention-days: 30
+    
+    - name: Run memory benchmarks
+      run: |
+        go test -bench=BenchmarkStaleEngine_StaleServing -benchmem -memprofile=mem.prof ./...
+        go test -bench=BenchmarkStaleEngine_CacheHit -benchmem -memprofile=mem_hit.prof ./...
+    
+    - name: Upload memory profiles
+      uses: actions/upload-artifact@v4
+      with:
+        name: memory-profiles
+        path: "*.prof"
+        retention-days: 30
