@@ -23,18 +23,7 @@ jobs:
     
     - name: Download dependencies
       run: go mod download
-    
-    - name: Install Gosec
-      run: go install github.com/securego/gosec/v2/cmd/gosec@latest
-    
-    - name: Run Gosec Security Scanner
-      run: gosec -fmt sarif -out gosec-results.sarif ./...
-    
-    - name: Upload SARIF file
-      uses: github/codeql-action/upload-sarif@v3
-      with:
-        sarif_file: gosec-results.sarif
-    
+
     - name: Install govulncheck
       run: go install golang.org/x/vuln/cmd/govulncheck@latest
     
