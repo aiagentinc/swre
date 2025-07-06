@@ -123,7 +123,6 @@ func (z *ZapAdapter) convertFields(fields []Field) []zap.Field {
 	return zapFields
 }
 
-
 // Helper function to handle stack traces for backward compatibility
 func captureStack() string {
 	return string(debug.Stack())
