@@ -21,9 +21,11 @@ jobs:
     
     - name: Check formatting
       run: |
-        if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+        unformatted=$(gofmt -s -l .)
+        if [ -n "$unformatted" ]; then
           echo "The following files are not formatted:"
-          gofmt -s -l .
+          echo "$unformatted"
+          echo "Please run 'gofmt -s -w .' to fix formatting"
           exit 1
         fi
     
