@@ -266,7 +266,7 @@ func TestStaleEngine_ShutdownTimeout(t *testing.T) {
 
 	// Start a goroutine that will block in refresh
 	go func() {
-		engine.Execute(context.Background(), "blocking-key", func() (interface{}, error) {
+		_, _ = engine.Execute(context.Background(), "blocking-key", func() (interface{}, error) {
 			<-blockCh // Block until channel is closed
 			return "new-value", nil
 		})

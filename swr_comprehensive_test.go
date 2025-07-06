@@ -230,7 +230,7 @@ func TestStaleEngine_AsyncRefreshWithShutdown(t *testing.T) {
 
 	// Trigger background refresh that will block
 	go func() {
-		engine.Execute(ctx, "shutdown-key", func() (interface{}, error) {
+		_, _ = engine.Execute(ctx, "shutdown-key", func() (interface{}, error) {
 			close(refreshStarted)
 			<-refreshBlocked // Block until we signal
 			return "refreshed", nil
@@ -329,7 +329,7 @@ func TestStaleEngine_TryAsyncRefreshRaceCondition(t *testing.T) {
 			go func(idx int) {
 				defer wg.Done()
 				key := fmt.Sprintf("race-key-%d", idx)
-				engine.Execute(ctx, key, func() (interface{}, error) {
+				_, _ = engine.Execute(ctx, key, func() (interface{}, error) {
 					refreshCount.Add(1)
 					time.Sleep(20 * time.Millisecond)
 					return fmt.Sprintf("refreshed-%d", idx), nil

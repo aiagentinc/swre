@@ -100,7 +100,9 @@ func (c *CompressedSerializer) Marshal(v interface{}) ([]byte, error) {
 	}
 
 	if _, err := w.Write(data); err != nil {
-		w.Close()
+		if closeErr := w.Close(); closeErr != nil {
+			return nil, fmt.Errorf("write error: %w, close error: %v", err, closeErr)
+		}
 		return nil, err
 	}
 

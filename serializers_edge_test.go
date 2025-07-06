@@ -65,7 +65,7 @@ func TestCompressedSerializer_UnmarshalIOError(t *testing.T) {
 	// Create truncated gzip data
 	var buf bytes.Buffer
 	w := gzip.NewWriter(&buf)
-	w.Write([]byte("test data that will be truncated"))
+	_, _ = w.Write([]byte("test data that will be truncated"))
 	w.Close()
 
 	// Truncate the data to cause IO error

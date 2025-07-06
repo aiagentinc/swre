@@ -150,7 +150,6 @@ func TestFieldCreation(t *testing.T) {
 	}
 }
 
-
 // TestNewLoggerAPI verifies the new Logger interface API.
 func TestNewLoggerAPI(t *testing.T) {
 	storage := NewMockStorage()
@@ -259,12 +258,12 @@ func TestTestLoggerMock(t *testing.T) {
 // BenchmarkLogging compares logging performance.
 func BenchmarkLogging(b *testing.B) {
 	storage := NewMockStorage()
-	
+
 	// Benchmark with NoOp logger
 	b.Run("NoOpLogger", func(b *testing.B) {
 		logger := NewNoOpLogger()
 		engine, _ := NewStaleEngine(storage, logger)
-		
+
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			engine.logger.Debug("test message",
@@ -279,7 +278,7 @@ func BenchmarkLogging(b *testing.B) {
 		zapLogger := zap.NewNop()
 		adapter, _ := NewZapAdapter(zapLogger)
 		engine, _ := NewStaleEngine(storage, adapter)
-		
+
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			engine.logger.Debug("test message",

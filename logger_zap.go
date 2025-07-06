@@ -123,16 +123,6 @@ func (z *ZapAdapter) convertFields(fields []Field) []zap.Field {
 	return zapFields
 }
 
-// zapToLoggerAdapter is a helper function that automatically wraps a *zap.Logger
-// into a Logger interface. This is used internally for backward compatibility.
-func zapToLoggerAdapter(zapLogger *zap.Logger) Logger {
-	if zapLogger == nil {
-		return NewNoOpLogger()
-	}
-	adapter, _ := NewZapAdapter(zapLogger)
-	return adapter
-}
-
 // Helper function to handle stack traces for backward compatibility
 func captureStack() string {
 	return string(debug.Stack())
