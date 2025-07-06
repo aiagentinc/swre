@@ -93,7 +93,7 @@ func TestStaleEngine_CallbackTimeout(t *testing.T) {
 		// Make the entry stale by manipulating the cache directly
 		entry, _ := storage.Get(ctx, "bg-key")
 		entry.StaleAfter = time.Now().UnixMilli() - 1000 // Make it stale
-		storage.Set(ctx, "bg-key", entry)
+		_ = storage.Set(ctx, "bg-key", entry)
 
 		// Execute with a slow callback - should return stale data immediately
 		// and trigger background refresh that will timeout

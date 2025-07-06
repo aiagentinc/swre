@@ -296,6 +296,7 @@ func (cb *CircuitBreaker) resetKeyBreaker(key string) {
 		// Update LRU access time
 		cb.keyBreakerMutex.Lock()
 		if _, exists := cb.keyBreakerLRU.Get(key); exists {
+			_ = exists
 			// Get operation already moves to front
 		}
 		cb.keyBreakerMutex.Unlock()

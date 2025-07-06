@@ -444,7 +444,7 @@ func TestStaleEngine_MaxConcurrentRefreshes(t *testing.T) {
 		key := fmt.Sprintf("key-%d", i)
 		go func(k string) {
 			defer wg.Done()
-			engine.Execute(ctx, k, func() (interface{}, error) {
+			_, _ = engine.Execute(ctx, k, func() (interface{}, error) {
 				select {
 				case refreshStarted <- k:
 				default:
@@ -477,7 +477,7 @@ func BenchmarkStaleEngine_CacheHit(b *testing.B) {
 	ctx := context.Background()
 
 	// Warm up cache
-	engine.Execute(ctx, "bench-key", func() (interface{}, error) {
+	_, _ = engine.Execute(ctx, "bench-key", func() (interface{}, error) {
 		return "benchmark-data", nil
 	})
 
