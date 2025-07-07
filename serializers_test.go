@@ -295,7 +295,7 @@ func TestCompressedSerializer_Errors(t *testing.T) {
 	var buf bytes.Buffer
 	w := gzip.NewWriter(&buf)
 	_, _ = w.Write([]byte("test"))
-	w.Close()
+	_ = w.Close()
 
 	err = s4.Unmarshal(buf.Bytes(), &struct{}{})
 	assert.Error(t, err)

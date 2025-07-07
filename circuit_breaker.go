@@ -217,14 +217,15 @@ func (cb *CircuitBreaker) recordSuccess(key string) {
 
 	// Update global state
 	state := cb.getState()
-	if state == CircuitHalfOpen {
+	switch state {
+	case CircuitHalfOpen:
 		successes := cb.successes.Add(1)
 		if successes >= cb.successThreshold {
 			cb.setState(CircuitClosed)
 			cb.failures.Store(0)
 			cb.successes.Store(0)
 		}
-	} else if state == CircuitClosed {
+	case CircuitClosed:
 		// Reset failure count on success in closed state
 		cb.failures.Store(0)
 	}

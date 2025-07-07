@@ -18,20 +18,20 @@ import (
 func createTestBadgerStorage(t *testing.T) (*badgerStorage, string) {
 	t.Helper()
 	dir := t.TempDir()
-	
+
 	config := DefaultBadgerConfig(dir)
-	
+
 	storage, err := NewBadgerStorage(context.Background(), config)
 	require.NoError(t, err)
 	require.NotNil(t, storage)
-	
+
 	return storage.(*badgerStorage), dir
 }
 
 func TestDefaultBadgerConfig(t *testing.T) {
 	dir := "/test/dir"
 	config := DefaultBadgerConfig(dir)
-	
+
 	assert.Equal(t, dir, config.Dir)
 	assert.Equal(t, dir, config.ValueDir)
 	assert.False(t, config.SyncWrites)
@@ -116,14 +116,14 @@ func TestNewBadgerStorage(t *testing.T) {
 			expectError: false,
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			config := tt.setupConfig()
 			ctx := tt.setupCtx()
-			
+
 			storage, err := NewBadgerStorage(ctx, config)
-			
+
 			if tt.expectError {
 				assert.Error(t, err)
 				if tt.errorCheck != nil {
@@ -133,7 +133,10 @@ func TestNewBadgerStorage(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				assert.NotNil(t, storage)
-				defer storage.Close()
+				defer func() {
+					err := storage.Close()
+					assert.NoError(t, err)
+				}()
 			}
 		})
 	}
@@ -141,22 +144,25 @@ func TestNewBadgerStorage(t *testing.T) {
 
 func TestBadgerStorage_Get(t *testing.T) {
 	storage, _ := createTestBadgerStorage(t)
-	defer storage.Close()
-	
+	defer func() {
+		err := storage.Close()
+		assert.NoError(t, err)
+	}()
+
 	ctx := context.Background()
-	
+
 	testEntry := &CacheEntry{
 		Value:        []byte("test value"),
 		CreatedAt:    time.Now().UnixMilli(),
 		StaleAfter:   time.Now().Add(30 * time.Minute).UnixMilli(),
 		ExpiresAfter: time.Now().Add(time.Hour).UnixMilli(),
 	}
-	
+
 	err := storage.Set(ctx, "test-key", testEntry)
 	require.NoError(t, err)
-	
+
 	// Note: Badger does not allow empty keys
-	
+
 	tests := []struct {
 		name        string
 		key         string
@@ -209,13 +215,13 @@ func TestBadgerStorage_Get(t *testing.T) {
 			},
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := tt.setupCtx()
-			
+
 			entry, err := storage.Get(ctx, tt.key)
-			
+
 			if tt.expectError {
 				assert.Error(t, err)
 				if tt.errorCheck != nil {
@@ -235,8 +241,11 @@ func TestBadgerStorage_Get(t *testing.T) {
 
 func TestBadgerStorage_Set(t *testing.T) {
 	storage, _ := createTestBadgerStorage(t)
-	defer storage.Close()
-	
+	defer func() {
+		err := storage.Close()
+		assert.NoError(t, err)
+	}()
+
 	tests := []struct {
 		name        string
 		key         string
@@ -323,13 +332,13 @@ func TestBadgerStorage_Set(t *testing.T) {
 			},
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := tt.setupCtx()
-			
+
 			err := storage.Set(ctx, tt.key, tt.entry)
-			
+
 			if tt.expectError {
 				assert.Error(t, err)
 				if tt.errorCheck != nil {
@@ -337,7 +346,7 @@ func TestBadgerStorage_Set(t *testing.T) {
 				}
 			} else {
 				assert.NoError(t, err)
-				
+
 				if ctx.Err() == nil && tt.entry != nil {
 					retrieved, err := storage.Get(context.Background(), tt.key)
 					assert.NoError(t, err)
@@ -350,8 +359,11 @@ func TestBadgerStorage_Set(t *testing.T) {
 
 func TestBadgerStorage_Delete(t *testing.T) {
 	storage, _ := createTestBadgerStorage(t)
-	defer storage.Close()
-	
+	defer func() {
+		err := storage.Close()
+		assert.NoError(t, err)
+	}()
+
 	ctx := context.Background()
 	entry := &CacheEntry{
 		Value:        []byte("test value"),
@@ -359,10 +371,10 @@ func TestBadgerStorage_Delete(t *testing.T) {
 		StaleAfter:   time.Now().Add(30 * time.Minute).UnixMilli(),
 		ExpiresAfter: time.Now().Add(time.Hour).UnixMilli(),
 	}
-	
+
 	err := storage.Set(ctx, "test-key", entry)
 	require.NoError(t, err)
-	
+
 	tests := []struct {
 		name        string
 		key         string
@@ -406,13 +418,13 @@ func TestBadgerStorage_Delete(t *testing.T) {
 			},
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := tt.setupCtx()
-			
+
 			err := storage.Delete(ctx, tt.key)
-			
+
 			if tt.expectError {
 				assert.Error(t, err)
 				if tt.errorCheck != nil {
@@ -420,7 +432,7 @@ func TestBadgerStorage_Delete(t *testing.T) {
 				}
 			} else {
 				assert.NoError(t, err)
-				
+
 				if tt.key == "test-key" && ctx.Err() == nil {
 					_, err := storage.Get(context.Background(), tt.key)
 					assert.Error(t, err)
@@ -434,27 +446,27 @@ func TestBadgerStorage_Delete(t *testing.T) {
 func TestBadgerStorage_Close(t *testing.T) {
 	t.Run("successful close", func(t *testing.T) {
 		storage, _ := createTestBadgerStorage(t)
-		
+
 		err := storage.Close()
 		assert.NoError(t, err)
-		
+
 		err = storage.Close()
 		assert.NoError(t, err)
 	})
-	
+
 	t.Run("operations after close", func(t *testing.T) {
 		storage, _ := createTestBadgerStorage(t)
-		
+
 		err := storage.Close()
 		require.NoError(t, err)
-		
+
 		ctx := context.Background()
 		_, err = storage.Get(ctx, "key")
 		assert.Error(t, err)
-		
+
 		err = storage.Set(ctx, "key", &CacheEntry{Value: []byte("test")})
 		assert.Error(t, err)
-		
+
 		err = storage.Delete(ctx, "key")
 		assert.Error(t, err)
 	})
@@ -462,10 +474,13 @@ func TestBadgerStorage_Close(t *testing.T) {
 
 func TestBadgerStorage_BatchOperations(t *testing.T) {
 	storage, _ := createTestBadgerStorage(t)
-	defer storage.Close()
-	
+	defer func() {
+		err := storage.Close()
+		assert.NoError(t, err)
+	}()
+
 	ctx := context.Background()
-	
+
 	// First, test regular operations
 	entries := make(map[string]*CacheEntry)
 	for i := 0; i < 10; i++ {
@@ -477,22 +492,22 @@ func TestBadgerStorage_BatchOperations(t *testing.T) {
 			ExpiresAfter: time.Now().Add(time.Hour).UnixMilli(),
 		}
 	}
-	
+
 	// Test with batch - need to create a batch first
 	batch := storage.db.NewWriteBatch()
 	defer batch.Cancel()
-	
+
 	batchCtx := WithWriteBatch(ctx, batch)
-	
+
 	for key, entry := range entries {
 		err := storage.Set(batchCtx, key, entry)
 		assert.NoError(t, err)
 	}
-	
+
 	// Commit the batch
 	err := batch.Flush()
 	assert.NoError(t, err)
-	
+
 	for key, expectedEntry := range entries {
 		retrieved, err := storage.Get(ctx, key)
 		assert.NoError(t, err)
@@ -502,19 +517,22 @@ func TestBadgerStorage_BatchOperations(t *testing.T) {
 
 func TestBadgerStorage_ConcurrentOperations(t *testing.T) {
 	storage, _ := createTestBadgerStorage(t)
-	defer storage.Close()
-	
+	defer func() {
+		err := storage.Close()
+		assert.NoError(t, err)
+	}()
+
 	ctx := context.Background()
 	numGoroutines := 10
 	numOperations := 100
-	
+
 	var wg sync.WaitGroup
 	wg.Add(numGoroutines)
-	
+
 	for i := 0; i < numGoroutines; i++ {
 		go func(goroutineID int) {
 			defer wg.Done()
-			
+
 			for j := 0; j < numOperations; j++ {
 				key := string(rune('a'+goroutineID)) + string(rune('0'+j%10))
 				entry := &CacheEntry{
@@ -523,14 +541,14 @@ func TestBadgerStorage_ConcurrentOperations(t *testing.T) {
 					StaleAfter:   time.Now().Add(30 * time.Minute).UnixMilli(),
 					ExpiresAfter: time.Now().Add(time.Hour).UnixMilli(),
 				}
-				
+
 				err := storage.Set(ctx, key, entry)
 				assert.NoError(t, err)
-				
+
 				retrieved, err := storage.Get(ctx, key)
 				assert.NoError(t, err)
 				assert.Equal(t, entry.Value, retrieved.Value)
-				
+
 				if j%3 == 0 {
 					err = storage.Delete(ctx, key)
 					assert.NoError(t, err)
@@ -538,16 +556,19 @@ func TestBadgerStorage_ConcurrentOperations(t *testing.T) {
 			}
 		}(i)
 	}
-	
+
 	wg.Wait()
 }
 
 func TestBadgerStorage_BufferPooling(t *testing.T) {
 	storage, _ := createTestBadgerStorage(t)
-	defer storage.Close()
-	
+	defer func() {
+		err := storage.Close()
+		assert.NoError(t, err)
+	}()
+
 	ctx := context.Background()
-	
+
 	sizes := []int{
 		100,
 		1024,
@@ -558,7 +579,7 @@ func TestBadgerStorage_BufferPooling(t *testing.T) {
 		128 * 1024,
 		256 * 1024,
 	}
-	
+
 	for _, size := range sizes {
 		t.Run(string(rune(size))+"_bytes", func(t *testing.T) {
 			key := string(rune(size)) + "_key"
@@ -566,17 +587,17 @@ func TestBadgerStorage_BufferPooling(t *testing.T) {
 			for i := range value {
 				value[i] = byte(i % 256)
 			}
-			
+
 			entry := &CacheEntry{
 				Value:        value,
 				CreatedAt:    time.Now().UnixMilli(),
 				StaleAfter:   time.Now().Add(30 * time.Minute).UnixMilli(),
 				ExpiresAfter: time.Now().Add(time.Hour).UnixMilli(),
 			}
-			
+
 			err := storage.Set(ctx, key, entry)
 			assert.NoError(t, err)
-			
+
 			retrieved, err := storage.Get(ctx, key)
 			assert.NoError(t, err)
 			assert.Equal(t, entry.Value, retrieved.Value)
@@ -586,16 +607,16 @@ func TestBadgerStorage_BufferPooling(t *testing.T) {
 
 func TestBadgerStorage_GCBehavior(t *testing.T) {
 	dir := t.TempDir()
-	
+
 	config := DefaultBadgerConfig(dir)
 	config.GCInterval = 1 * time.Second
 	config.GCDiscardRatio = 0.1
-	
+
 	storage, err := NewBadgerStorage(context.Background(), config)
 	require.NoError(t, err)
-	
+
 	ctx := context.Background()
-	
+
 	for i := 0; i < 100; i++ {
 		key := string(rune(i))
 		entry := &CacheEntry{
@@ -607,22 +628,22 @@ func TestBadgerStorage_GCBehavior(t *testing.T) {
 		err := storage.Set(ctx, key, entry)
 		assert.NoError(t, err)
 	}
-	
+
 	for i := 0; i < 50; i++ {
 		key := string(rune(i))
 		err := storage.Delete(ctx, key)
 		assert.NoError(t, err)
 	}
-	
+
 	time.Sleep(3 * time.Second)
-	
+
 	err = storage.Close()
 	assert.NoError(t, err)
 }
 
 func TestBadgerStorage_CorruptedData(t *testing.T) {
 	storage, dir := createTestBadgerStorage(t)
-	
+
 	ctx := context.Background()
 	key := "test-key"
 	entry := &CacheEntry{
@@ -631,35 +652,38 @@ func TestBadgerStorage_CorruptedData(t *testing.T) {
 		StaleAfter:   time.Now().Add(30 * time.Minute).UnixMilli(),
 		ExpiresAfter: time.Now().Add(time.Hour).UnixMilli(),
 	}
-	
+
 	err := storage.Set(ctx, key, entry)
 	require.NoError(t, err)
-	
+
 	err = storage.Close()
 	require.NoError(t, err)
-	
+
 	manifestPath := filepath.Join(dir, "MANIFEST")
 	err = os.WriteFile(manifestPath, []byte("corrupted"), 0644)
 	require.NoError(t, err)
-	
+
 	config := DefaultBadgerConfig(dir)
-	
+
 	_, err = NewBadgerStorage(context.Background(), config)
 	assert.Error(t, err)
 }
 
 func TestWithWriteBatch(t *testing.T) {
 	ctx := context.Background()
-	
+
 	// Create a mock write batch
 	storage, _ := createTestBadgerStorage(t)
-	defer storage.Close()
-	
+	defer func() {
+		err := storage.Close()
+		assert.NoError(t, err)
+	}()
+
 	batch := storage.db.NewWriteBatch()
 	defer batch.Cancel()
-	
+
 	batchCtx := WithWriteBatch(ctx, batch)
-	
+
 	value := batchCtx.Value(batchCtxKey{})
 	assert.NotNil(t, value)
 	assert.Equal(t, batch, value)
@@ -697,25 +721,27 @@ func TestGetBufferFromPool(t *testing.T) {
 			expectedPool: "largePool",
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			buf, cleanup := getBufferFromPool(tt.sizeHint)
 			defer cleanup()
-			
+
 			assert.NotNil(t, buf)
 			assert.GreaterOrEqual(t, cap(*buf), 0)
 		})
 	}
 }
 
-
 func TestBadgerStorage_TTLHandling(t *testing.T) {
 	storage, _ := createTestBadgerStorage(t)
-	defer storage.Close()
-	
+	defer func() {
+		err := storage.Close()
+		assert.NoError(t, err)
+	}()
+
 	ctx := context.Background()
-	
+
 	tests := []struct {
 		name  string
 		entry *CacheEntry
@@ -748,13 +774,13 @@ func TestBadgerStorage_TTLHandling(t *testing.T) {
 			},
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			key := tt.name + "_key"
 			err := storage.Set(ctx, key, tt.entry)
 			assert.NoError(t, err)
-			
+
 			retrieved, err := storage.Get(ctx, key)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.entry.Value, retrieved.Value)
@@ -764,8 +790,13 @@ func TestBadgerStorage_TTLHandling(t *testing.T) {
 
 func BenchmarkBadgerStorage_Get(b *testing.B) {
 	storage, _ := createTestBadgerStorage(&testing.T{})
-	defer storage.Close()
-	
+	defer func() {
+		err := storage.Close()
+		if err != nil {
+			b.Fatal(err)
+		}
+	}()
+
 	ctx := context.Background()
 	key := "bench-key"
 	entry := &CacheEntry{
@@ -774,12 +805,12 @@ func BenchmarkBadgerStorage_Get(b *testing.B) {
 		StaleAfter:   time.Now().Add(30 * time.Minute).UnixMilli(),
 		ExpiresAfter: time.Now().Add(time.Hour).UnixMilli(),
 	}
-	
+
 	err := storage.Set(ctx, key, entry)
 	if err != nil {
 		b.Fatal(err)
 	}
-	
+
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
@@ -793,8 +824,13 @@ func BenchmarkBadgerStorage_Get(b *testing.B) {
 
 func BenchmarkBadgerStorage_Set(b *testing.B) {
 	storage, _ := createTestBadgerStorage(&testing.T{})
-	defer storage.Close()
-	
+	defer func() {
+		err := storage.Close()
+		if err != nil {
+			b.Fatal(err)
+		}
+	}()
+
 	ctx := context.Background()
 	entry := &CacheEntry{
 		Value:        []byte("benchmark value"),
@@ -802,7 +838,7 @@ func BenchmarkBadgerStorage_Set(b *testing.B) {
 		StaleAfter:   time.Now().Add(30 * time.Minute).UnixMilli(),
 		ExpiresAfter: time.Now().Add(time.Hour).UnixMilli(),
 	}
-	
+
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
@@ -824,7 +860,7 @@ func BenchmarkBadgerStorage_BufferPooling(b *testing.B) {
 		32768,
 		131072,
 	}
-	
+
 	for _, size := range sizes {
 		b.Run(string(rune(size))+"_bytes", func(b *testing.B) {
 			b.RunParallel(func(pb *testing.PB) {

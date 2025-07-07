@@ -119,7 +119,9 @@ func (c *CompressedSerializer) Unmarshal(data []byte, v interface{}) error {
 	if err != nil {
 		return err
 	}
-	defer r.Close()
+	defer func() {
+		_ = r.Close()
+	}()
 
 	decompressed, err := io.ReadAll(r)
 	if err != nil {
