@@ -295,7 +295,7 @@ func TestStaleEngine_ExpiredEntry(t *testing.T) {
 // TestStaleEngine_TryAsyncRefreshRaceCondition tests concurrent refresh attempts
 func TestStaleEngine_TryAsyncRefreshRaceCondition(t *testing.T) {
 	storage := NewMockStorage()
-	logger := NewTestLogger(t)
+	logger := NewSafeTestLogger(t)
 
 	engine, _ := NewStaleEngineWithOptions(storage, logger,
 		WithMaxConcurrentRefreshes(5),
@@ -348,7 +348,7 @@ func TestStaleEngine_TryAsyncRefreshRaceCondition(t *testing.T) {
 // TestStaleEngine_ContextCancellation tests context cancellation behavior
 func TestStaleEngine_ContextCancellation(t *testing.T) {
 	storage := NewMockStorage()
-	logger := NewTestLogger(t)
+	logger := NewSafeTestLogger(t)
 
 	engine, _ := NewStaleEngine(storage, logger)
 

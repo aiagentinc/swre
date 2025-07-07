@@ -17,6 +17,55 @@ func NewTestLogger(t *testing.T) Logger {
 	return adapter
 }
 
+// NewSafeTestLogger creates a logger that safely handles logging after test completion.
+// This is useful when dealing with background goroutines that might log after the test ends.
+func NewSafeTestLogger(t *testing.T) Logger {
+	// Use a NoOpLogger wrapped in a safe adapter
+	// This prevents race conditions when background goroutines
+	// try to log after the test has completed
+	return &safeTestLogger{
+		t:      t,
+		logger: NewNoOpLogger(),
+	}
+}
+
+// safeTestLogger wraps a logger to handle post-test logging safely
+type safeTestLogger struct {
+	t      *testing.T
+	logger Logger
+}
+
+func (s *safeTestLogger) Debug(msg string, fields ...Field) {
+	if s.t != nil {
+		s.logger.Debug(msg, fields...)
+	}
+}
+
+func (s *safeTestLogger) Info(msg string, fields ...Field) {
+	if s.t != nil {
+		s.logger.Info(msg, fields...)
+	}
+}
+
+func (s *safeTestLogger) Warn(msg string, fields ...Field) {
+	if s.t != nil {
+		s.logger.Warn(msg, fields...)
+	}
+}
+
+func (s *safeTestLogger) Error(msg string, fields ...Field) {
+	if s.t != nil {
+		s.logger.Error(msg, fields...)
+	}
+}
+
+func (s *safeTestLogger) Named(name string) Logger {
+	return &safeTestLogger{
+		t:      s.t,
+		logger: s.logger.Named(name),
+	}
+}
+
 // NewBenchmarkLogger creates a no-op logger suitable for benchmarks.
 // This avoids the overhead of logging during performance tests.
 func NewBenchmarkLogger() Logger {
