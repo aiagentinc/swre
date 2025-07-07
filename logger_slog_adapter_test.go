@@ -38,11 +38,11 @@ func TestNewSlogAdapter(t *testing.T) {
 
 func TestSlogAdapter_LoggingMethods(t *testing.T) {
 	tests := []struct {
-		name     string
-		logFunc  func(adapter *SlogAdapter, msg string, fields ...Field)
-		level    slog.Level
-		message  string
-		fields   []Field
+		name    string
+		logFunc func(adapter *SlogAdapter, msg string, fields ...Field)
+		level   slog.Level
+		message string
+		fields  []Field
 	}{
 		{
 			name:    "Debug with no fields",
@@ -361,7 +361,7 @@ func TestSlogAdapter_convertFieldsToAttrs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			attrs := adapter.convertFieldsToAttrs(tt.fields)
-			
+
 			if len(attrs) != tt.expectedCount {
 				t.Errorf("expected %d attributes, got %d", tt.expectedCount, len(attrs))
 			}
@@ -414,9 +414,9 @@ func TestSlogAdapter_ContextLogging(t *testing.T) {
 	var buf bytes.Buffer
 	handler := slog.NewJSONHandler(&buf, nil)
 	baseLogger := slog.New(handler)
-	
+
 	contextLogger := baseLogger.With("request-id", "12345")
-	
+
 	adapter, _ := NewSlogAdapter(contextLogger)
 	adapter.Info("context message", String("key", "value"))
 
@@ -428,7 +428,7 @@ func TestSlogAdapter_ContextLogging(t *testing.T) {
 	if msg, ok := logEntry["msg"].(string); !ok || msg != "context message" {
 		t.Errorf("expected message %q, got %q", "context message", msg)
 	}
-	
+
 	if reqID, ok := logEntry["request-id"].(string); !ok || reqID != "12345" {
 		t.Errorf("expected request-id %q, got %q", "12345", reqID)
 	}
@@ -440,6 +440,6 @@ type fieldImpl struct {
 	fieldType FieldType
 }
 
-func (f *fieldImpl) Key() string          { return f.key }
-func (f *fieldImpl) Value() interface{}   { return f.value }
-func (f *fieldImpl) Type() FieldType      { return f.fieldType }
+func (f *fieldImpl) Key() string        { return f.key }
+func (f *fieldImpl) Value() interface{} { return f.value }
+func (f *fieldImpl) Type() FieldType    { return f.fieldType }
