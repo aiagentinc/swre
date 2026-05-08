@@ -212,6 +212,15 @@ func TestRefreshTracker_GracefulShutdown(t *testing.T) {
 	// (This is just a basic check - the cleanup goroutine stopping is verified by Stop() returning)
 }
 
+func TestRefreshTracker_StopIdempotent(t *testing.T) {
+	rt := NewRefreshTracker(1 * time.Second)
+
+	rt.Stop()
+	rt.Stop()
+
+	assert.True(t, rt.TrySet("after-stop"), "tracker map operations remain safe after cleanup stops")
+}
+
 // TestRefreshTracker_EdgeCases tests edge cases
 func TestRefreshTracker_EdgeCases(t *testing.T) {
 	rt := NewRefreshTracker(1 * time.Second)

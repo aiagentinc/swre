@@ -107,6 +107,40 @@ func DefaultBadgerConfig(dir string) BadgerConfig {
 	}
 }
 
+// SetDefaults fills zero-valued tunables with production defaults while
+// preserving explicit overrides.
+func (c *BadgerConfig) SetDefaults() {
+	defaults := DefaultBadgerConfig(c.Dir)
+
+	if c.ValueDir == "" {
+		c.ValueDir = defaults.ValueDir
+	}
+	if c.ValueThreshold <= 0 {
+		c.ValueThreshold = defaults.ValueThreshold
+	}
+	if c.MemTableSize <= 0 {
+		c.MemTableSize = defaults.MemTableSize
+	}
+	if c.MaxTableSize <= 0 {
+		c.MaxTableSize = defaults.MaxTableSize
+	}
+	if c.NumCompactors <= 0 {
+		c.NumCompactors = defaults.NumCompactors
+	}
+	if c.ValueLogFileSize <= 0 {
+		c.ValueLogFileSize = defaults.ValueLogFileSize
+	}
+	if c.GCInterval <= 0 {
+		c.GCInterval = defaults.GCInterval
+	}
+	if c.GCDiscardRatio <= 0 || c.GCDiscardRatio >= 1 {
+		c.GCDiscardRatio = defaults.GCDiscardRatio
+	}
+	if c.Compression != options.None && c.BlockCacheSize <= 0 {
+		c.BlockCacheSize = 64 << 20
+	}
+}
+
 // ---------- Implementation ----------
 
 type badgerStorage struct {
@@ -127,6 +161,17 @@ var _ Storage = (*badgerStorage)(nil)
 // --------------------------------------------------------------------------
 
 func NewBadgerStorage(ctx context.Context, cfg BadgerConfig) (Storage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cfg.SetDefaults()
+	if cfg.Dir == "" {
+		return nil, errors.New("badger dir cannot be empty")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	opts := badger.
 		DefaultOptions(cfg.Dir).
 		WithValueDir(cfg.ValueDir).
@@ -160,6 +205,12 @@ func NewBadgerStorage(ctx context.Context, cfg BadgerConfig) (Storage, error) {
 
 	select {
 	case <-ctx.Done():
+		go func() {
+			r := <-resCh
+			if r.db != nil {
+				_ = r.db.Close()
+			}
+		}()
 		return nil, ctx.Err()
 	case r := <-resCh:
 		if r.err != nil {
@@ -218,17 +269,33 @@ func getBufferFromPool(sizeHint int) (*[]byte, func()) {
 	case sizeHint <= 4<<10:
 		bufPtr = smallBufPool.Get().(*[]byte)
 		*bufPtr = (*bufPtr)[:0] // reset but preserve capacity
-		return bufPtr, func() { smallBufPool.Put(bufPtr) }
+		return bufPtr, func() {
+			if cap(*bufPtr) <= 4<<10 {
+				smallBufPool.Put(bufPtr)
+			}
+		}
 
 	case sizeHint <= 32<<10:
 		bufPtr = mediumBufPool.Get().(*[]byte)
 		*bufPtr = (*bufPtr)[:0]
-		return bufPtr, func() { mediumBufPool.Put(bufPtr) }
+		return bufPtr, func() {
+			if cap(*bufPtr) <= 32<<10 {
+				mediumBufPool.Put(bufPtr)
+			}
+		}
 
-	default:
+	case sizeHint <= 1<<20:
 		bufPtr = largeBufPool.Get().(*[]byte)
 		*bufPtr = (*bufPtr)[:0]
-		return bufPtr, func() { largeBufPool.Put(bufPtr) }
+		return bufPtr, func() {
+			if cap(*bufPtr) <= 1<<20 {
+				largeBufPool.Put(bufPtr)
+			}
+		}
+
+	default:
+		buf := make([]byte, 0, sizeHint)
+		return &buf, func() {}
 	}
 }
 
@@ -246,6 +313,12 @@ func getBufferFromPool(sizeHint int) (*[]byte, func()) {
 // - Zero-copy value access where possible
 // - Automatic buffer return to prevent leaks
 func (b *badgerStorage) Get(ctx context.Context, key string) (*CacheEntry, error) {
+	if b.closed.Load() {
+		return nil, ErrStorageClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// Fast-fail if context is already cancelled
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -307,6 +380,15 @@ func (b *badgerStorage) Get(ctx context.Context, key string) (*CacheEntry, error
 // - Falls back to individual transactions if no batch present
 // - Maintains consistency across both operation modes
 func (b *badgerStorage) Set(ctx context.Context, key string, value *CacheEntry) error {
+	if b.closed.Load() {
+		return ErrStorageClosed
+	}
+	if value == nil {
+		return ErrNilCacheEntry
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// Quick exit if context is already cancelled
 	if err := ctx.Err(); err != nil {
 		return err
@@ -352,6 +434,12 @@ func (b *badgerStorage) Set(ctx context.Context, key string, value *CacheEntry) 
 }
 
 func (b *badgerStorage) Delete(ctx context.Context, key string) error {
+	if b.closed.Load() {
+		return ErrStorageClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -427,7 +515,9 @@ func (b *badgerStorage) runValueLogGC() {
 						if backoffDelay > 30*time.Second {
 							backoffDelay = 30 * time.Second
 						}
-						time.Sleep(backoffDelay)
+						if !b.sleepOrDone(backoffDelay) {
+							return
+						}
 					}
 
 					break
@@ -438,7 +528,9 @@ func (b *badgerStorage) runValueLogGC() {
 				gcAttempts++
 
 				// Small sleep between GC operations to reduce resource contention
-				time.Sleep(100 * time.Millisecond)
+				if !b.sleepOrDone(100 * time.Millisecond) {
+					return
+				}
 			}
 
 			if successInRound {
@@ -449,6 +541,18 @@ func (b *badgerStorage) runValueLogGC() {
 		case <-b.doneCh:
 			return
 		}
+	}
+}
+
+func (b *badgerStorage) sleepOrDone(d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return true
+	case <-b.doneCh:
+		return false
 	}
 }
 

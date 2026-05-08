@@ -257,6 +257,10 @@ func TestCompressedSerializer_Constructor(t *testing.T) {
 
 	assert.Equal(t, inner, s.Inner)
 	assert.Equal(t, gzip.DefaultCompression, s.Level)
+
+	defaulted := NewCompressedSerializer(nil)
+	assert.IsType(t, &JSONSerializer{}, defaulted.Inner)
+	assert.Equal(t, gzip.DefaultCompression, defaulted.Level)
 }
 
 // TestCompressedSerializer_Errors tests compression errors
@@ -272,6 +276,15 @@ func TestCompressedSerializer_Errors(t *testing.T) {
 	_, err := s.Marshal("test")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "marshal error")
+
+	// Nil inner serializer should return an error instead of panicking
+	sNil := &CompressedSerializer{Level: gzip.DefaultCompression}
+	_, err = sNil.Marshal("test")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "inner serializer cannot be nil")
+	err = sNil.Unmarshal([]byte("test"), &struct{}{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "inner serializer cannot be nil")
 
 	// Test invalid compression level
 	s2 := &CompressedSerializer{

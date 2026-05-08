@@ -4,7 +4,6 @@
 package swre
 
 import (
-	"hash/fnv"
 	"sync"
 	"time"
 )
@@ -40,6 +39,7 @@ type RefreshTracker struct {
 	ttl        time.Duration
 	cleanupCtx chan struct{}
 	wg         sync.WaitGroup
+	stopOnce   sync.Once
 }
 
 // refreshShard represents a single shard with its own lock
@@ -58,6 +58,10 @@ type refreshShard struct {
 // - Recommended: 2-5x your typical refresh timeout
 // - Default: 5 minutes for most caching scenarios
 func NewRefreshTracker(ttl time.Duration) *RefreshTracker {
+	if ttl <= 0 {
+		ttl = minRefreshTrackerTTL
+	}
+
 	rt := &RefreshTracker{
 		ttl:        ttl,
 		cleanupCtx: make(chan struct{}),
@@ -79,10 +83,16 @@ func NewRefreshTracker(ttl time.Duration) *RefreshTracker {
 
 // getShard returns the shard for a given key using FNV-1a hash
 func (rt *RefreshTracker) getShard(key string) *refreshShard {
-	h := fnv.New32a()
-	// FNV-1a hash Write never returns an error, but we handle it to satisfy gosec
-	_, _ = h.Write([]byte(key))
-	return rt.shards[h.Sum32()&shardMask]
+	return rt.shards[fnv32a(key)&shardMask]
+}
+
+func fnv32a(key string) uint32 {
+	hash := uint32(2166136261)
+	for i := 0; i < len(key); i++ {
+		hash ^= uint32(key[i])
+		hash *= 16777619
+	}
+	return hash
 }
 
 // TrySet atomically attempts to mark a key as being refreshed.
@@ -221,8 +231,10 @@ func (rt *RefreshTracker) cleanupExpired() {
 
 // Stop gracefully shuts down the refresh tracker and its cleanup goroutine.
 func (rt *RefreshTracker) Stop() {
-	close(rt.cleanupCtx)
-	rt.wg.Wait()
+	rt.stopOnce.Do(func() {
+		close(rt.cleanupCtx)
+		rt.wg.Wait()
+	})
 }
 
 // Size returns the current number of tracked refresh operations.

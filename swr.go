@@ -52,7 +52,8 @@ type Option func(*StaleEngine)
 func WithCacheTTL(ttl *CacheTTL) Option {
 	return func(e *StaleEngine) {
 		if ttl != nil {
-			e.defaultCacheTTL = ttl
+			ttlCopy := *ttl
+			e.defaultCacheTTL = &ttlCopy
 		}
 	}
 }
@@ -109,9 +110,21 @@ func WithRefreshTimeout(timeout time.Duration) Option {
 	}
 }
 
+// WithRefreshTrackerTTL sets how long an in-flight background refresh marker is
+// retained if a refresh goroutine is unable to clean it up normally.
+func WithRefreshTrackerTTL(ttl time.Duration) Option {
+	return func(e *StaleEngine) {
+		if ttl > 0 {
+			e.refreshTrackerTTL = ttl
+		}
+	}
+}
+
 //--------------------------------------------------
 // Engine
 //--------------------------------------------------
+
+const minRefreshTrackerTTL = 5 * time.Minute
 
 // StaleEngine implements SWR caching logic that scales to massive concurrency.
 // All public methods are goroutine‑safe.
@@ -139,6 +152,7 @@ type StaleEngine struct {
 	// Performance controls
 	maxConcurrentRefreshes int
 	refreshTimeout         time.Duration
+	refreshTrackerTTL      time.Duration
 	currentRefreshes       atomic.Int32
 
 	// Shutdown support
@@ -170,10 +184,6 @@ func NewStaleEngineWithOptions(storage Storage, logger Logger, opts ...Option) (
 
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 
-	// Create refresh tracker with 5 minute TTL to prevent memory leaks
-	// This ensures refresh flags are automatically cleaned up even if goroutines crash
-	refreshTracker := NewRefreshTracker(5 * time.Minute)
-
 	e := &StaleEngine{
 		storage:                storage,
 		logger:                 logger.Named("StaleEngine"),
@@ -183,7 +193,6 @@ func NewStaleEngineWithOptions(storage Storage, logger Logger, opts ...Option) (
 		metrics:                &NoOpMetrics{},
 		maxConcurrentRefreshes: 1000,
 		refreshTimeout:         30 * time.Second,
-		refreshTracker:         refreshTracker,
 		shutdownCtx:            shutdownCtx,
 		shutdownCancel:         shutdownCancel,
 	}
@@ -201,13 +210,28 @@ func NewStaleEngineWithOptions(storage Storage, logger Logger, opts ...Option) (
 		}
 	}
 
+	if e.refreshTrackerTTL <= 0 {
+		e.refreshTrackerTTL = defaultRefreshTrackerTTL(e.refreshTimeout)
+	}
+	e.refreshTracker = NewRefreshTracker(e.refreshTrackerTTL)
+
 	e.logger.Info("StaleEngine initialised",
 		Int("defaultFreshSeconds", e.defaultCacheTTL.FreshSeconds),
 		Int("defaultStaleSeconds", e.defaultCacheTTL.StaleSeconds),
 		Int("defaultExpiredSeconds", e.defaultCacheTTL.ExpiredSeconds),
-		Int("maxConcurrentRefreshes", e.maxConcurrentRefreshes))
+		Int("maxConcurrentRefreshes", e.maxConcurrentRefreshes),
+		Duration("refreshTimeout", e.refreshTimeout),
+		Duration("refreshTrackerTTL", e.refreshTrackerTTL))
 
 	return e, nil
+}
+
+func defaultRefreshTrackerTTL(refreshTimeout time.Duration) time.Duration {
+	ttl := refreshTimeout * 2
+	if ttl < minRefreshTrackerTTL {
+		return minRefreshTrackerTTL
+	}
+	return ttl
 }
 
 // NewStaleEngineWithConfig creates engine with full configuration
@@ -225,6 +249,7 @@ func NewStaleEngineWithConfig(cfg *EngineConfig) (*StaleEngine, error) {
 		WithMetrics(cfg.Metrics),
 		WithMaxConcurrentRefreshes(cfg.MaxConcurrentRefreshes),
 		WithRefreshTimeout(cfg.RefreshTimeout),
+		WithRefreshTrackerTTL(cfg.RefreshTrackerTTL),
 	}
 
 	// Use new CacheTTL if provided
@@ -309,6 +334,9 @@ func (e *StaleEngine) ExecuteGeneric(ctx context.Context, key string, result int
 
 // GetCacheEntry retrieves a cache entry without triggering refresh
 func (e *StaleEngine) GetCacheEntry(ctx context.Context, key string) (*CacheEntry, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	return e.storage.Get(ctx, key)
 }
 
@@ -319,24 +347,19 @@ func (e *StaleEngine) GetCacheEntry(ctx context.Context, key string) (*CacheEntr
 //   - Single upstream call per key at any time.
 //   - Upstream call continues even if the original caller cancels context.
 func (e *StaleEngine) Execute(ctx context.Context, keyOrCacheKey interface{}, fn StaleEngineCallback) (*CacheEntry, error) {
-	// Extract key and TTL from parameter
-	var key string
-	var cacheKey CacheKey
-
-	switch k := keyOrCacheKey.(type) {
-	case string:
-		key = k
-		cacheKey = CacheKey{Key: k, TTL: nil}
-	case CacheKey:
-		key = k.Key
-		cacheKey = k
-	default:
-		return nil, fmt.Errorf("invalid key type: %T", keyOrCacheKey)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if fn == nil {
+		return nil, ErrNilCallback
 	}
 
-	if key == "" {
-		return nil, errors.New("cache key cannot be empty")
+	cacheKey, err := parseCacheKey(keyOrCacheKey)
+	if err != nil {
+		return nil, err
 	}
+	key := cacheKey.Key
+
 	entry, err := e.storage.Get(ctx, key)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		e.metrics.RecordError(key, err)
@@ -354,7 +377,7 @@ func (e *StaleEngine) Execute(ctx context.Context, keyOrCacheKey interface{}, fn
 		e.metrics.RecordMiss(key)
 		return e.syncRefresh(ctx, nil, cacheKey, fn)
 
-	case entry.IsExpired(): // expired value
+	case entry.IsExpiredAt(nowMs): // expired value
 		e.logger.Debug("cache expired",
 			String("key", key),
 			Int64("now_ms", nowMs),
@@ -366,7 +389,7 @@ func (e *StaleEngine) Execute(ctx context.Context, keyOrCacheKey interface{}, fn
 		e.tryAsyncRefresh(cacheKey, fn)
 		return entry.CloneWithStatus("expired"), nil
 
-	case entry.IsStale(): // stale‑while‑revalidate
+	case entry.IsStaleAt(nowMs): // stale‑while‑revalidate
 		e.logger.Debug("cache stale",
 			String("key", key),
 			Int64("now_ms", nowMs),
@@ -392,6 +415,34 @@ func (e *StaleEngine) Execute(ctx context.Context, keyOrCacheKey interface{}, fn
 	}
 }
 
+func parseCacheKey(keyOrCacheKey interface{}) (CacheKey, error) {
+	var cacheKey CacheKey
+
+	switch k := keyOrCacheKey.(type) {
+	case string:
+		cacheKey = CacheKey{Key: k}
+	case CacheKey:
+		cacheKey = k
+	case *CacheKey:
+		if k == nil {
+			return CacheKey{}, errors.New("cache key cannot be nil")
+		}
+		cacheKey = *k
+	default:
+		return CacheKey{}, fmt.Errorf("invalid key type: %T", keyOrCacheKey)
+	}
+
+	if cacheKey.Key == "" {
+		return CacheKey{}, errors.New("cache key cannot be empty")
+	}
+	if cacheKey.TTL != nil {
+		ttlCopy := *cacheKey.TTL
+		cacheKey.TTL = &ttlCopy
+	}
+
+	return cacheKey, nil
+}
+
 //--------------------------------------------------
 // Internal helpers
 //--------------------------------------------------
@@ -403,23 +454,16 @@ func (e *StaleEngine) syncRefresh(
 	cacheKey CacheKey,
 	fn StaleEngineCallback,
 ) (*CacheEntry, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-	// 1) Use shutdownCtx as root, allowing refresh to be cancelled during Stop()
-	parentCtx, cancelParent := context.WithCancel(e.shutdownCtx)
-	defer cancelParent()
-
-	// Let upper-level ctx Done() also drive cancellation
-	go func() {
-		select {
-		case <-ctx.Done():
-			cancelParent()
-		case <-parentCtx.Done():
-		}
-	}()
-
-	// 2) Singleflight - pass cancellable context when going to upstream
+	// The singleflight work must not be rooted in the request context. A cold
+	// miss can be shared by unrelated callers, so caller cancellation only stops
+	// this caller from waiting; the shared refresh continues until it finishes,
+	// times out, or the engine is shut down.
 	resCh := e.sfg.DoChan(cacheKey.Key, func() (interface{}, error) {
-		return e.safeCall(parentCtx, cacheKey, fn)
+		return e.safeCall(e.shutdownCtx, cacheKey, fn)
 	})
 
 	select {
@@ -438,8 +482,7 @@ func (e *StaleEngine) syncRefresh(
 		// we can directly read from storage
 		entry, err := e.storage.Get(context.Background(), cacheKey.Key)
 		if err == nil && entry != nil {
-			entry.Status = "miss"
-			return entry, nil
+			return entry.CloneWithStatus("miss"), nil
 		}
 		// This should not happen in theory; fallback to reconstruction
 		e.logger.Warn("storage miss right after safeCall",
@@ -451,9 +494,15 @@ func (e *StaleEngine) syncRefresh(
 		if err != nil {
 			return nil, fmt.Errorf("marshal after storage miss: %w", err)
 		}
-		ttl, staleTTL, ttlErr := e.ttlCalculator.CalculateTTL(cacheKey.Key, res.Val)
-		if ttlErr != nil {
-			return nil, fmt.Errorf("ttl calc failed: %w", ttlErr)
+		var ttl, staleTTL time.Duration
+		if cacheKey.TTL != nil {
+			ttl, staleTTL = cacheKey.TTL.ToEngineTTLs()
+		} else {
+			var ttlErr error
+			ttl, staleTTL, ttlErr = e.ttlCalculator.CalculateTTL(cacheKey.Key, res.Val)
+			if ttlErr != nil {
+				return nil, fmt.Errorf("ttl calc failed: %w", ttlErr)
+			}
 		}
 		rebuilt := NewCacheEntryWithTTL(cacheKey.Key, data, ttl, staleTTL)
 		rebuilt.Status = "miss"
@@ -483,6 +532,9 @@ func (e *StaleEngine) safeCall(
 
 	start := time.Now()
 	key := cacheKey.Key
+	if ctxParent == nil {
+		ctxParent = context.Background()
+	}
 
 	// Top-level defer: capture performance metrics and handle any unhandled panics
 	defer func() {
@@ -497,8 +549,8 @@ func (e *StaleEngine) safeCall(
 		e.metrics.RecordLatency(key, time.Since(start))
 	}()
 
-	// Step 1: Execute callback with timeout protection
-	ctx, cancel := context.WithTimeout(ctxParent, e.refreshTimeout)
+	// Step 1: Execute the whole refresh attempt under one operation deadline.
+	opCtx, cancel := context.WithTimeout(ctxParent, e.refreshTimeout)
 	defer cancel()
 
 	type cbResult struct {
@@ -522,17 +574,18 @@ func (e *StaleEngine) safeCall(
 
 		select {
 		case resCh <- cbResult{v, e}: // Normal send
-		case <-ctx.Done(): // Caller timed out/cancelled, return directly
+		case <-opCtx.Done(): // Refresh attempt timed out/cancelled, return directly
 		}
 	}()
 
 	var raw interface{}
 	select {
-	case <-ctx.Done():
-		err = fmt.Errorf("callback timeout after %v", e.refreshTimeout)
-		e.logger.Warn("callback execution timeout",
+	case <-opCtx.Done():
+		err = refreshContextError(opCtx, e.refreshTimeout)
+		e.logger.Warn("callback execution stopped",
 			String("key", key),
-			Duration("timeout", e.refreshTimeout))
+			Duration("timeout", e.refreshTimeout),
+			Error(err))
 		e.metrics.RecordError(key, err)
 		return nil, err
 
@@ -546,7 +599,7 @@ func (e *StaleEngine) safeCall(
 
 	// Step 2: Optional value transformation
 	if e.valueTransformer != nil {
-		raw, err = e.valueTransformer.Transform(ctxParent, key, raw)
+		raw, err = e.valueTransformer.Transform(opCtx, key, raw)
 		if err != nil {
 			e.metrics.RecordError(key, err)
 			return nil, fmt.Errorf("value transformation failed: %w", err)
@@ -590,7 +643,19 @@ func (e *StaleEngine) safeCall(
 	}
 	storeTimeout := baseTimeout + time.Duration(extraMs)*time.Millisecond
 
-	storeCtx, storeCancel := context.WithTimeout(ctxParent, storeTimeout)
+	if deadline, ok := opCtx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			err = refreshContextError(opCtx, e.refreshTimeout)
+			e.metrics.RecordError(key, err)
+			return nil, err
+		}
+		if storeTimeout > remaining {
+			storeTimeout = remaining
+		}
+	}
+
+	storeCtx, storeCancel := context.WithTimeout(opCtx, storeTimeout)
 	defer storeCancel()
 
 	if err = e.storage.Set(storeCtx, key, entry); err != nil {
@@ -606,6 +671,17 @@ func (e *StaleEngine) safeCall(
 	return raw, nil
 }
 
+func refreshContextError(ctx context.Context, timeout time.Duration) error {
+	err := ctx.Err()
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("callback timeout after %v", timeout)
+	}
+	if err != nil {
+		return err
+	}
+	return context.Canceled
+}
+
 // tryAsyncRefresh schedules a background refresh for the given key if:
 //   - no other goroutine is already refreshing it, and
 //   - current concurrent refreshes < maxConcurrentRefreshes.
@@ -615,6 +691,10 @@ func (e *StaleEngine) safeCall(
 // but not returned to the caller.
 func (e *StaleEngine) tryAsyncRefresh(cacheKey CacheKey, fn StaleEngineCallback) {
 	key := cacheKey.Key
+	if err := e.shutdownCtx.Err(); err != nil {
+		e.metrics.RecordError(key, err)
+		return
+	}
 
 	//----------------------------------------------------------------------
 	// 1) Quick detection: if refresh marker already exists, return immediately
@@ -668,7 +748,7 @@ func (e *StaleEngine) tryAsyncRefresh(cacheKey CacheKey, fn StaleEngineCallback)
 				e.logger.Error("panic in background refresh",
 					String("key", key),
 					Any("panic", r),
-					Stack("stack"))
+					Stack(captureStack()))
 				e.metrics.RecordError(key, fmt.Errorf("panic in refresh: %v", r))
 			}
 
@@ -681,35 +761,21 @@ func (e *StaleEngine) tryAsyncRefresh(cacheKey CacheKey, fn StaleEngineCallback)
 				Int32("remaining_refreshes", e.currentRefreshes.Load()))
 		}()
 
-		// ctx = shutdownCtx (global) + refreshTimeout (local timeout)
-		ctx, cancel := context.WithTimeout(e.shutdownCtx, e.refreshTimeout)
-		defer cancel()
-
 		// Ensure only one actual upstream call via singleflight
-		resCh := e.sfg.DoChan(key, func() (interface{}, error) {
-			// Pass derived ctx to safeCall so it can be cancelled during shutdown
-			return e.safeCall(ctx, cacheKey, fn)
+		_, err, shared := e.sfg.Do(key, func() (interface{}, error) {
+			return e.safeCall(e.shutdownCtx, cacheKey, fn)
 		})
-
-		select {
-		case res := <-resCh:
-			if res.Err != nil {
-				e.logger.Debug("asynchronous refresh failed",
-					String("key", key),
-					Error(res.Err))
-				e.metrics.RecordError(key, res.Err)
-			} else {
-				e.logger.Debug("asynchronous refresh succeeded",
-					String("key", key))
-				e.metrics.RecordHit(key, "refresh")
-			}
-
-		case <-ctx.Done():
-			// Could be timeout or shutdown triggered cancellation
-			e.logger.Warn("asynchronous refresh timeout/cancelled",
+		if err != nil {
+			e.logger.Debug("asynchronous refresh failed",
 				String("key", key),
-				Error(ctx.Err()))
-			e.metrics.RecordError(key, ctx.Err())
+				Any("shared", shared),
+				Error(err))
+			e.metrics.RecordError(key, err)
+		} else {
+			e.logger.Debug("asynchronous refresh succeeded",
+				String("key", key),
+				Any("shared", shared))
+			e.metrics.RecordHit(key, "refresh")
 		}
 	}()
 }

@@ -79,6 +79,9 @@ type CompressedSerializer struct {
 }
 
 func NewCompressedSerializer(inner Serializer) *CompressedSerializer {
+	if inner == nil {
+		inner = &JSONSerializer{}
+	}
 	return &CompressedSerializer{
 		Inner: inner,
 		Level: gzip.DefaultCompression,
@@ -86,6 +89,10 @@ func NewCompressedSerializer(inner Serializer) *CompressedSerializer {
 }
 
 func (c *CompressedSerializer) Marshal(v interface{}) ([]byte, error) {
+	if c.Inner == nil {
+		return nil, fmt.Errorf("inner serializer cannot be nil")
+	}
+
 	// First serialize with inner serializer
 	data, err := c.Inner.Marshal(v)
 	if err != nil {
@@ -114,6 +121,10 @@ func (c *CompressedSerializer) Marshal(v interface{}) ([]byte, error) {
 }
 
 func (c *CompressedSerializer) Unmarshal(data []byte, v interface{}) error {
+	if c.Inner == nil {
+		return fmt.Errorf("inner serializer cannot be nil")
+	}
+
 	// First decompress
 	r, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {

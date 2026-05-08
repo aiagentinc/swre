@@ -21,6 +21,7 @@ const (
 
 var (
 	ErrCircuitOpen = errors.New("circuit breaker is open")
+	ErrNilEngine   = errors.New("circuit breaker engine cannot be nil")
 )
 
 // CircuitBreaker wraps StaleEngine with circuit breaker pattern
@@ -65,38 +66,57 @@ type CircuitBreakerConfig struct {
 
 // NewCircuitBreaker creates a new circuit breaker wrapper
 func NewCircuitBreaker(cfg CircuitBreakerConfig) *CircuitBreaker {
-	if cfg.FailureThreshold == 0 {
+	if cfg.FailureThreshold <= 0 {
 		cfg.FailureThreshold = 5
 	}
-	if cfg.SuccessThreshold == 0 {
+	if cfg.SuccessThreshold <= 0 {
 		cfg.SuccessThreshold = 2
 	}
-	if cfg.Timeout == 0 {
+	if cfg.Timeout <= 0 {
 		cfg.Timeout = 30 * time.Second
 	}
-	if cfg.MaxHalfOpenReqs == 0 {
+	if cfg.MaxHalfOpenReqs <= 0 {
 		cfg.MaxHalfOpenReqs = 3
 	}
-	if cfg.MaxKeyBreakers == 0 {
+	if cfg.MaxKeyBreakers <= 0 {
 		cfg.MaxKeyBreakers = 10000 // Default to 10k keys
 	}
 
-	// Create LRU cache for key breakers
-	lruCache, _ := lru.New[string, *keyCircuitBreaker](cfg.MaxKeyBreakers)
-
-	return &CircuitBreaker{
+	cb := &CircuitBreaker{
 		engine:           cfg.Engine,
 		failureThreshold: cfg.FailureThreshold,
 		successThreshold: cfg.SuccessThreshold,
 		timeout:          cfg.Timeout,
 		maxHalfOpenReqs:  cfg.MaxHalfOpenReqs,
 		maxKeyBreakers:   cfg.MaxKeyBreakers,
-		keyBreakerLRU:    lruCache,
 	}
+
+	lruCache, err := lru.NewWithEvict[string, *keyCircuitBreaker](
+		cfg.MaxKeyBreakers,
+		func(key string, _ *keyCircuitBreaker) {
+			cb.keyBreakers.Delete(key)
+		},
+	)
+	if err != nil {
+		lruCache, _ = lru.NewWithEvict[string, *keyCircuitBreaker](
+			10000,
+			func(key string, _ *keyCircuitBreaker) {
+				cb.keyBreakers.Delete(key)
+			},
+		)
+		cb.maxKeyBreakers = 10000
+	}
+	cb.keyBreakerLRU = lruCache
+
+	return cb
 }
 
 // Execute wraps StaleEngine.Execute with circuit breaker logic
 func (cb *CircuitBreaker) Execute(ctx context.Context, key string, fn StaleEngineCallback) (*CacheEntry, error) {
+	if cb == nil || cb.engine == nil {
+		return nil, ErrNilEngine
+	}
+
 	// Check global circuit state
 	if !cb.canExecute() {
 		return nil, ErrCircuitOpen
@@ -131,6 +151,10 @@ func (cb *CircuitBreaker) Execute(ctx context.Context, key string, fn StaleEngin
 
 // ExecuteGeneric wraps StaleEngine.ExecuteGeneric with circuit breaker logic
 func (cb *CircuitBreaker) ExecuteGeneric(ctx context.Context, key string, result interface{}, fn StaleEngineCallback) error {
+	if cb == nil || cb.engine == nil {
+		return ErrNilEngine
+	}
+
 	entry, err := cb.Execute(ctx, key, fn)
 	if err != nil {
 		return err

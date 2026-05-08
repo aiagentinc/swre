@@ -46,6 +46,12 @@ type Storage interface {
 // ErrNotFound is returned when a key is not found in the storage.
 var ErrNotFound = errors.New("key not found in storage")
 
+// ErrStorageClosed is returned when a storage backend has already been closed.
+var ErrStorageClosed = errors.New("storage is closed")
+
+// ErrNilCacheEntry is returned when storage is asked to persist a nil entry.
+var ErrNilCacheEntry = errors.New("cache entry cannot be nil")
+
 // CacheEntry represents a cache entry with full SWR (Stale-While-Revalidate) metadata.
 // This structure encapsulates all information needed to implement SWR caching logic
 // including precise timing control and status tracking.
@@ -251,6 +257,9 @@ func NewCacheEntryWithTTL(key string, value []byte, ttl, staleTTL time.Duration)
 	}
 	if staleTTL < 0 {
 		staleTTL = 1 * time.Second
+	}
+	if staleTTL > ttl {
+		staleTTL = ttl
 	}
 
 	// Create entry with calculated timestamps

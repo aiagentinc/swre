@@ -38,6 +38,7 @@ func TestStaleEngine_NewStaleEngineWithConfig(t *testing.T) {
 		},
 		MaxConcurrentRefreshes: 50,
 		RefreshTimeout:         10 * time.Second,
+		RefreshTrackerTTL:      1 * time.Minute,
 	}
 
 	engine, err := NewStaleEngineWithConfig(cfg)
@@ -45,6 +46,7 @@ func TestStaleEngine_NewStaleEngineWithConfig(t *testing.T) {
 	assert.NotNil(t, engine)
 	assert.Equal(t, 50, engine.maxConcurrentRefreshes)
 	assert.Equal(t, 10*time.Second, engine.refreshTimeout)
+	assert.Equal(t, 1*time.Minute, engine.refreshTrackerTTL)
 }
 
 // TestStaleEngine_InvalidConstructors tests error cases
@@ -145,6 +147,16 @@ func TestStaleEngine_ExecuteWithCacheKey(t *testing.T) {
 	// The TTL calculator should have used the per-key TTL
 	// Note: actual TTL will be much longer due to default stale/expired calculation
 	assert.NotNil(t, entry)
+
+	pointerKey := &CacheKey{
+		Key: "custom-ttl-pointer-key",
+		TTL: cacheKey.TTL,
+	}
+	entry, err = engine.Execute(ctx, pointerKey, func() (interface{}, error) {
+		return "custom-pointer-data", nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "miss", entry.Status)
 }
 
 // TestStaleEngine_InvalidKeyTypes tests invalid key parameter types
@@ -168,6 +180,17 @@ func TestStaleEngine_InvalidKeyTypes(t *testing.T) {
 	})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "cache key cannot be empty")
+
+	// Nil CacheKey pointer
+	_, err = engine.Execute(ctx, (*CacheKey)(nil), func() (interface{}, error) {
+		return "data", nil
+	})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "cache key cannot be nil")
+
+	// Nil callback
+	_, err = engine.Execute(ctx, "nil-callback-key", nil)
+	assert.ErrorIs(t, err, ErrNilCallback)
 }
 
 // TestStaleEngine_StorageErrors tests storage error handling
@@ -375,6 +398,65 @@ func TestStaleEngine_ContextCancellation(t *testing.T) {
 	<-done
 }
 
+func TestStaleEngine_RequestCancellationDoesNotCancelSharedRefresh(t *testing.T) {
+	storage := NewMockStorage()
+	logger := NewSafeTestLogger(t)
+
+	engine, err := NewStaleEngineWithOptions(storage, logger,
+		WithRefreshTimeout(2*time.Second))
+	require.NoError(t, err)
+	defer engine.Shutdown()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	firstDone := make(chan error, 1)
+	secondDone := make(chan struct {
+		entry *CacheEntry
+		err   error
+	}, 1)
+
+	var startedOnce sync.Once
+	var calls atomic.Int32
+	fn := func() (interface{}, error) {
+		calls.Add(1)
+		startedOnce.Do(func() { close(started) })
+		<-release
+		return "shared-data", nil
+	}
+
+	firstCtx, firstCancel := context.WithCancel(context.Background())
+	go func() {
+		_, err := engine.Execute(firstCtx, "shared-cancel-key", fn)
+		firstDone <- err
+	}()
+
+	<-started
+	firstCancel()
+	require.ErrorIs(t, <-firstDone, context.Canceled)
+
+	go func() {
+		entry, err := engine.Execute(context.Background(), "shared-cancel-key", fn)
+		secondDone <- struct {
+			entry *CacheEntry
+			err   error
+		}{entry: entry, err: err}
+	}()
+
+	time.Sleep(25 * time.Millisecond)
+	assert.Equal(t, int32(1), calls.Load(), "second caller should attach to the existing refresh")
+
+	close(release)
+	second := <-secondDone
+	require.NoError(t, second.err)
+	require.NotNil(t, second.entry)
+	assert.Equal(t, "miss", second.entry.Status)
+	assert.Equal(t, int32(1), calls.Load())
+
+	cached, err := storage.Get(context.Background(), "shared-cancel-key")
+	require.NoError(t, err)
+	assert.NotEmpty(t, cached.Value)
+}
+
 // TestStaleEngine_WithAllOptions tests all configuration options
 func TestStaleEngine_WithAllOptions(t *testing.T) {
 	storage := NewMockStorage()
@@ -400,7 +482,8 @@ func TestStaleEngine_WithAllOptions(t *testing.T) {
 		WithValueTransformer(customTransformer),
 		WithMetrics(customMetrics),
 		WithMaxConcurrentRefreshes(100),
-		WithRefreshTimeout(60*time.Second))
+		WithRefreshTimeout(60*time.Second),
+		WithRefreshTrackerTTL(3*time.Minute))
 
 	require.NoError(t, err)
 	assert.NotNil(t, engine)
@@ -410,6 +493,7 @@ func TestStaleEngine_WithAllOptions(t *testing.T) {
 	assert.Equal(t, customMetrics, engine.metrics)
 	assert.Equal(t, 100, engine.maxConcurrentRefreshes)
 	assert.Equal(t, 60*time.Second, engine.refreshTimeout)
+	assert.Equal(t, 3*time.Minute, engine.refreshTrackerTTL)
 }
 
 // TestCacheTTL_ToEngineTTLs tests TTL conversion

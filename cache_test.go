@@ -200,6 +200,13 @@ func TestNewCacheEntryWithTTL(t *testing.T) {
 		{
 			name:             "stale TTL larger than TTL",
 			ttl:              30 * time.Second,
+			staleTTL:         2 * time.Minute,
+			expectedTTL:      30 * time.Second,
+			expectedStaleTTL: 30 * time.Second,
+		},
+		{
+			name:             "negative stale TTL with short TTL",
+			ttl:              30 * time.Second,
 			staleTTL:         -5 * time.Minute,
 			expectedTTL:      30 * time.Second,
 			expectedStaleTTL: 1 * time.Second, // Updated to match new logic: if staleTTL < 0, it becomes 1 second

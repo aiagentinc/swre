@@ -10,6 +10,9 @@ import (
 var (
 	// ErrNilLogger is returned when a nil logger is provided
 	ErrNilLogger = errors.New("logger cannot be nil")
+
+	// ErrNilCallback is returned when Execute is called without an upstream callback.
+	ErrNilCallback = errors.New("callback cannot be nil")
 )
 
 // Serializer defines the interface for cache value serialization.
@@ -141,6 +144,7 @@ type EngineConfig struct {
 	// Performance and concurrency controls
 	MaxConcurrentRefreshes int           // Limit for background refresh goroutines
 	RefreshTimeout         time.Duration // Individual refresh operation timeout
+	RefreshTrackerTTL      time.Duration // Expiry for abandoned refresh markers
 }
 
 // SetDefaults applies default values to config
@@ -179,10 +183,13 @@ func (c *EngineConfig) SetDefaults() {
 	if c.Serializer == nil {
 		c.Serializer = &JSONSerializer{}
 	}
-	if c.MaxConcurrentRefreshes == 0 {
+	if c.MaxConcurrentRefreshes <= 0 {
 		c.MaxConcurrentRefreshes = 1000
 	}
-	if c.RefreshTimeout == 0 {
+	if c.RefreshTimeout <= 0 {
 		c.RefreshTimeout = 30 * time.Second
+	}
+	if c.RefreshTrackerTTL < 0 {
+		c.RefreshTrackerTTL = 0
 	}
 }

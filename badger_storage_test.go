@@ -49,6 +49,28 @@ func TestDefaultBadgerConfig(t *testing.T) {
 	assert.Nil(t, config.Logger)
 }
 
+func TestBadgerConfig_SetDefaults(t *testing.T) {
+	dir := t.TempDir()
+	config := BadgerConfig{Dir: dir}
+	config.SetDefaults()
+
+	assert.Equal(t, dir, config.ValueDir)
+	assert.Equal(t, 4<<10, config.ValueThreshold)
+	assert.Equal(t, int64(256<<20), config.MemTableSize)
+	assert.Equal(t, int64(128<<20), config.MaxTableSize)
+	assert.Equal(t, runtime.GOMAXPROCS(0), config.NumCompactors)
+	assert.Equal(t, int64(1<<30), config.ValueLogFileSize)
+	assert.Equal(t, 10*time.Minute, config.GCInterval)
+	assert.Equal(t, 0.8, config.GCDiscardRatio)
+}
+
+func TestNewBadgerStorage_WithMinimalConfig(t *testing.T) {
+	storage, err := NewBadgerStorage(context.Background(), BadgerConfig{Dir: t.TempDir()})
+	require.NoError(t, err)
+	require.NotNil(t, storage)
+	assert.NoError(t, storage.Close())
+}
+
 func TestNewBadgerStorage(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -89,6 +111,15 @@ func TestNewBadgerStorage(t *testing.T) {
 			errorCheck: func(err error) bool {
 				return errors.Is(err, context.Canceled)
 			},
+		},
+		{
+			name: "nil context uses background",
+			setupConfig: func() BadgerConfig {
+				dir := t.TempDir()
+				return DefaultBadgerConfig(dir)
+			},
+			setupCtx:    func() context.Context { return nil },
+			expectError: false,
 		},
 		{
 			name: "with compression enabled",
@@ -304,6 +335,16 @@ func TestBadgerStorage_Set(t *testing.T) {
 			expectError: true,
 			errorCheck: func(err error) bool {
 				return errors.Is(err, context.Canceled)
+			},
+		},
+		{
+			name:        "nil entry",
+			key:         "nil-entry-key",
+			entry:       nil,
+			setupCtx:    func() context.Context { return context.Background() },
+			expectError: true,
+			errorCheck: func(err error) bool {
+				return errors.Is(err, ErrNilCacheEntry)
 			},
 		},
 		{

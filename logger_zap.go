@@ -101,7 +101,11 @@ func (z *ZapAdapter) convertFields(fields []Field) []zap.Field {
 		case FieldTypeError:
 			if err, ok := f.Value().(error); ok {
 				if err != nil {
-					zapFields = append(zapFields, zap.Error(err))
+					if f.Key() == "error" {
+						zapFields = append(zapFields, zap.Error(err))
+					} else {
+						zapFields = append(zapFields, zap.NamedError(f.Key(), err))
+					}
 				}
 			}
 		case FieldTypeByteString:

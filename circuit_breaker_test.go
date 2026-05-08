@@ -76,6 +76,16 @@ func TestNewCircuitBreaker(t *testing.T) {
 }
 
 func TestCircuitBreakerExecute(t *testing.T) {
+	t.Run("nil engine returns error", func(t *testing.T) {
+		cb := NewCircuitBreaker(CircuitBreakerConfig{})
+		entry, err := cb.Execute(context.Background(), "test-key", func() (interface{}, error) {
+			return "value", nil
+		})
+
+		assert.ErrorIs(t, err, ErrNilEngine)
+		assert.Nil(t, entry)
+	})
+
 	t.Run("successful execution in closed state", func(t *testing.T) {
 		cb := createTestCircuitBreaker(t, nil)
 		ctx := context.Background()
@@ -245,6 +255,16 @@ func TestCircuitBreakerExecute(t *testing.T) {
 }
 
 func TestCircuitBreakerExecuteGeneric(t *testing.T) {
+	t.Run("nil engine returns error", func(t *testing.T) {
+		cb := NewCircuitBreaker(CircuitBreakerConfig{})
+		var result string
+		err := cb.ExecuteGeneric(context.Background(), "test-key", &result, func() (interface{}, error) {
+			return "value", nil
+		})
+
+		assert.ErrorIs(t, err, ErrNilEngine)
+	})
+
 	t.Run("successful execution", func(t *testing.T) {
 		cb := createTestCircuitBreaker(t, nil)
 		ctx := context.Background()
@@ -392,6 +412,13 @@ func TestPerKeyCircuitBreaker(t *testing.T) {
 		lruLen := cb.keyBreakerLRU.Len()
 		cb.keyBreakerMutex.Unlock()
 		assert.Equal(t, 3, lruLen) // Should be capped at maxKeyBreakers
+
+		var syncMapLen int
+		cb.keyBreakers.Range(func(_, _ interface{}) bool {
+			syncMapLen++
+			return true
+		})
+		assert.LessOrEqual(t, syncMapLen, 3)
 	})
 }
 
